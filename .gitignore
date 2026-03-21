@@ -16,6 +16,9 @@ build/
 build-*/
 build_*/
 tmp/
+/outputs/
+__pycache__/
+*.pyc
 
 # SPM
 .build/

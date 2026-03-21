@@ -841,6 +841,99 @@ Some of the examples are even ported to run in the browser using WebAssembly. Ch
 | [yt-wsp.sh](examples/yt-wsp.sh)                     |                                       | Download + transcribe and/or translate any VOD [(original)](https://gist.github.com/DaniruKun/96f763ec1a037cc92fe1a059b643b818) |
 | [wchess](examples/wchess)                           | [wchess.wasm](examples/wchess)        | Voice-controlled chess                                                                                                          |
 
+## Podcast Download + Transcription Workflow (local one-command)
+
+This repository includes `scripts/podcast_workflow.py` for:
+
+1. download podcast audio from Apple Podcasts / Xiaoyuzhou URL
+2. transcode to MP3
+3. run local Whisper transcription
+4. (default) merge speaker labels with local tinydiarize model
+
+Chinese guide: [scripts/README.podcast_workflow.zh.md](scripts/README.podcast_workflow.zh.md)
+
+### Quick setup from a fresh clone
+
+Build CLI:
+
+```bash
+cmake -B build
+cmake --build build -j --config Release
+```
+
+Install dependencies:
+
+```bash
+# macOS
+brew install yt-dlp ffmpeg
+```
+
+```bash
+# Ubuntu
+sudo apt update
+sudo apt install -y ffmpeg python3-pip
+python3 -m pip install -U yt-dlp
+```
+
+Download models:
+
+```bash
+./models/download-ggml-model.sh large-v3-turbo
+curl -fL "https://huggingface.co/akashmjn/tinydiarize-whisper.cpp/resolve/main/ggml-small.en-tdrz.bin" \
+  -o ./models/ggml-small.en-tdrz.bin \
+  || curl -fL "https://hf-mirror.com/akashmjn/tinydiarize-whisper.cpp/resolve/main/ggml-small.en-tdrz.bin" \
+  -o ./models/ggml-small.en-tdrz.bin
+```
+
+Run with one URL:
+
+```bash
+python3 scripts/podcast_workflow.py --url "<podcast-episode-url>"
+```
+
+Example:
+
+```bash
+python3 scripts/podcast_workflow.py \
+  --url "https://www.xiaoyuzhoufm.com/episode/69a64629de29766da93331ec"
+```
+
+### Output
+
+Each run creates a new folder under `./outputs`, for example:
+
+- `audio.mp3`
+- `01_transcript.md`
+
+Most users only need `01_transcript.md`.
+
+If you want debugging artifacts (`json/srt/txt` + `run_manifest.json`), enable:
+
+```bash
+python3 scripts/podcast_workflow.py --url "<podcast-episode-url>" --keep-json-artifacts
+```
+
+### Show page URLs
+
+Show URLs (multi-episode pages) open an interactive selector for recent episodes.
+For non-interactive runs, pass `--episode-index`:
+
+```bash
+python3 scripts/podcast_workflow.py \
+  --url "<show-url>" \
+  --episode-index 1
+```
+
+### Notes
+
+- GPU acceleration is on by default (`--gpu` / `--no-gpu`).
+- Progress heartbeat prints every 30s by default (`--progress-interval 30`).
+- On macOS, keep-awake is enabled by default during ASR (`--keep-awake` / `--no-keep-awake`).
+- JSON/SRT/TXT outputs are removed by default (`--keep-json-artifacts` to retain).
+- Speaker diarization is on by default (`--diarization`).
+- If tinydiarize model is unavailable, use `--no-diarization`.
+- Missing dependencies/models are reported with install hints and the script exits immediately.
+
 ## [Discussions](https://github.com/ggml-org/whisper.cpp/discussions)
 
 If you have any kind of feedback about this project feel free to use the Discussions section and open a new topic.
