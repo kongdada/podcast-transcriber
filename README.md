@@ -9,6 +9,14 @@
 
 Stable: [v1.8.1](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.8.1) / [Roadmap](https://github.com/orgs/ggml-org/projects/4/)
 
+## Local Podcast Script (Chinese)
+
+- 中文使用说明：[`scripts/README.podcast_workflow.zh.md`](scripts/README.podcast_workflow.zh.md)
+- 一条命令输入 Apple Podcasts / 小宇宙单集链接，自动下载音频并转写
+- 支持本地 `whisper-cli` 转录，可选 GPU 加速与运行中进度心跳
+- 产出精简为 `audio.mp3` + `01_transcript.md`，默认不保留中间 JSON/SRT
+- 可选 tinydiarize 说话人分离并合并成带说话人标注的稿件
+
 High-performance inference of [OpenAI's Whisper](https://github.com/openai/whisper) automatic speech recognition (ASR) model:
 
 - Plain C/C++ implementation without dependencies
