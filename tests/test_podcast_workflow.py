@@ -64,8 +64,6 @@ class PodcastWorkflowUnitTests(unittest.TestCase):
         self.assertNotIn("-ng", cmd)
         self.assertIn("-mc", cmd)
         self.assertIn("0", cmd)
-        self.assertIn("-otxt", cmd)
-        self.assertIn("-osrt", cmd)
         self.assertIn("-oj", cmd)
         self.assertIn("-pp", cmd)
         self.assertIn("-l", cmd)
@@ -82,6 +80,84 @@ class PodcastWorkflowUnitTests(unittest.TestCase):
         )
         self.assertIn("-ng", cpu_cmd)
 
+    def test_transcript_markdown_merges_speaker_turns(self) -> None:
+        segments = [
+            pw.Segment(t0_ms=0, t1_ms=1000, text="你好", speaker="Speaker A"),
+            pw.Segment(t0_ms=1000, t1_ms=2000, text="世界", speaker="Speaker A"),
+            pw.Segment(t0_ms=2000, t1_ms=3000, text="收到", speaker="Speaker B"),
+        ]
+
+        rendered = pw.transcript_markdown(
+            segments,
+            source_url="https://example.com/ep",
+            episode_title="示例",
+            language="zh",
+            speaker_names={"Speaker A": "张潇雨", "Speaker B": "雨白"},
+        )
+
+        self.assertIn("张潇雨（00:00:00 - 00:00:02）：\n你好，世界。", rendered)
+        self.assertIn("\n\n雨白（00:00:02 - 00:00:03）：\n收到。", rendered)
+        self.assertNotIn("Speaker A", rendered)
+
+    def test_transcript_markdown_wraps_long_turn_body(self) -> None:
+        text = (
+            "这是第一句，主要是为了测试长段落自动换行。"
+            "这是第二句，也会继续补充一些内容，让这一段超过一百个字。"
+            "最后再来一句，确保会在合适的标点位置断开，读起来不会太累。"
+            "再补一段内容，模拟真实播客里单人连续说很多话的情况，避免输出变成一整块难读的文字。"
+        )
+        segments = [pw.Segment(t0_ms=0, t1_ms=1000, text=text, speaker="Speaker A")]
+
+        rendered = pw.transcript_markdown(
+            segments,
+            source_url="https://example.com/ep",
+            episode_title="示例",
+            language="zh",
+            speaker_names={"Speaker A": "张潇雨"},
+        )
+
+        body = rendered.split("张潇雨（00:00:00 - 00:00:01）：\n", 1)[1].split("\n\n", 1)[0].splitlines()
+        self.assertGreater(len(body), 1)
+        for line in body:
+            self.assertLessEqual(len(line), pw.TURN_WRAP_CHARS)
+
+    def test_profile_auto_match_and_apply_to_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            profile_path = Path(tmp_dir) / "demo.profile.json"
+            profile_path.write_text(
+                (
+                    "{\n"
+                    '  "name": "demo",\n'
+                    '  "match": {"title_regex": "示例播客"},\n'
+                    '  "speaker_a_name": "雨白",\n'
+                    '  "speaker_b_name": "张潇雨",\n'
+                    '  "noise_phrases": ["广告词"],\n'
+                    '  "replacements": {"播客": "播客节目"}\n'
+                    "}\n"
+                ),
+                encoding="utf-8",
+            )
+
+            selected = pw.EpisodeCandidate("示例播客 第1期", "https://example.com/ep", None, 0, None, None)
+            profile = pw.resolve_profile(
+                explicit_profile=None,
+                profile_dir=tmp_dir,
+                input_url="https://example.com/show",
+                selected_episode=selected,
+            )
+
+            self.assertIsNotNone(profile)
+            assert profile is not None
+            self.assertEqual(profile.speaker_a_name, "雨白")
+
+            segments = [
+                pw.Segment(t0_ms=0, t1_ms=1, text="这是广告词"),
+                pw.Segment(t0_ms=1, t1_ms=2, text="这是一段播客"),
+            ]
+            applied = pw.apply_profile_to_segments(segments, profile)
+            self.assertEqual(len(applied), 1)
+            self.assertEqual(applied[0].text, "这是一段播客节目")
+
 
 class PodcastWorkflowExecutionTests(unittest.TestCase):
     def _make_args(self, out_root: str, episode_index: int | None = None) -> Namespace:
@@ -89,9 +165,13 @@ class PodcastWorkflowExecutionTests(unittest.TestCase):
             url="https://example.com/podcast",
             episode_index=episode_index,
             out_root=out_root,
+            profile=None,
+            profile_dir="./scripts/podcast_profiles",
             whisper_bin="./build/bin/whisper-cli",
             asr_model="./models/ggml-large-v3-turbo.bin",
             diarization=False,
+            speaker_a_name=None,
+            speaker_b_name=None,
             tdrz_model="./models/ggml-small.en-tdrz.bin",
             language="zh",
             threads=8,
@@ -172,8 +252,9 @@ class PodcastWorkflowExecutionTests(unittest.TestCase):
             self.assertTrue((out_dir / "01_transcript.md").exists())
             self.assertFalse((out_dir / "01_transcript.txt").exists())
             self.assertFalse((out_dir / "01_transcript.srt").exists())
-            self.assertFalse((out_dir / "01_transcript.json").exists())
+            self.assertTrue((out_dir / "01_transcript.json").exists())
             self.assertFalse((out_dir / "run_manifest.json").exists())
+            self.assertFalse((out_dir / "02_transcript_clean.md").exists())
 
             transcript = (out_dir / "01_transcript.md").read_text(encoding="utf-8")
             self.assertIn("[00:00:00 - 00:00:01]", transcript)

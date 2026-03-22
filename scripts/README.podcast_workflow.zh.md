@@ -1,26 +1,63 @@
 # 播客下载与转录工作流（中文说明）
 
-本文档目标：让新用户 clone 项目后，按步骤执行，输入一个播客链接即可得到转录文件。
+本文档面向 CLI 使用场景：clone 项目后，输入一个播客链接，得到一份基础转录稿 `01_transcript.md`。
 
 脚本入口：`scripts/podcast_workflow.py`
 
-## 能力范围
+## CLI 负责什么
 
-脚本会自动完成以下流程：
+脚本会自动完成：
 
 1. 解析 Apple Podcasts / 小宇宙链接
 2. 下载音频并转码为 MP3
-3. 用本地 `whisper.cpp` 转写
-4. （默认）用本地 `small.en-tdrz` 合并说话人标签
-5. 输出 `01_transcript.md` 等结果文件
+3. 用本地 `whisper.cpp` 生成 `01_transcript.json`
+4. （默认）运行 `tinydiarize` 生成说话人分离 JSON
+5. 合并轮次，输出对谈稿格式的 `01_transcript.md`
+6. 应用 `profile` 中的说话人名称、噪声短语和术语替换
 
-## 从零开始（可直接复制）
+脚本不负责语义清洗。`02_transcript_clean.md` 由仓库内的 skill 生成。
+
+说明：
+
+- 当前工作流按 `Speaker A / Speaker B` 两位对谈场景设计
+- `tinydiarize` 主要提供二人轮次提示
+
+## 完整工作流程图
+
+```mermaid
+flowchart TD
+    A["输入播客 URL"] --> B["scripts/podcast_workflow.py<br/>解析 URL / 选集"]
+    B --> C["yt-dlp 下载音频"]
+    C --> D["ffmpeg 转为 audio.mp3"]
+    D --> E["whisper-cli 主转写<br/>生成 01_transcript.json"]
+    E --> F{"开启 diarization?"}
+    F -- "是" --> G["tinydiarize<br/>生成 01_diarization_tdrz.json"]
+    F -- "否" --> H["直接排版"]
+    G --> H["合并轮次 + profile 替换/噪声过滤<br/>输出 01_transcript.md"]
+    H --> I["基础产物完成"]
+
+    I --> J{"是否继续做忠实清洗?"}
+    J -- "否" --> K["结束<br/>交付 01_transcript.md"]
+    J -- "是" --> L["podcast-transcript-editor skill"]
+    L --> M["cleanup_helper.py plan<br/>分块 + 脏块筛选"]
+    M --> N{"块类型"}
+    N -- "pass_through" --> O["跳过模型"]
+    N -- "from_cache" --> P["复用缓存块"]
+    N -- "needs_model" --> Q["送模型做忠实清洗"]
+    O --> R["assemble 组装输出"]
+    P --> R
+    Q --> S["回填 cleaned_block"]
+    S --> R
+    R --> T["生成 02_transcript_clean.md<br/>并更新缓存"]
+```
+
+## 从零开始
 
 ### 1) clone 并进入目录
 
 ```bash
-git clone https://github.com/ggml-org/whisper.cpp.git
-cd whisper.cpp
+git clone https://github.com/kongdada/podcast-transcriber.git
+cd podcast-transcriber
 ```
 
 ### 2) 编译 `whisper-cli`
@@ -46,15 +83,15 @@ sudo apt install -y ffmpeg python3-pip
 python3 -m pip install -U yt-dlp
 ```
 
-### 4) 下载本地模型
+### 4) 下载模型
 
-下载主转写模型（高精度）：
+主转写模型：
 
 ```bash
 ./models/download-ggml-model.sh large-v3-turbo
 ```
 
-下载说话人分离模型（默认开启）：
+说话人分离模型：
 
 ```bash
 curl -fL "https://huggingface.co/akashmjn/tinydiarize-whisper.cpp/resolve/main/ggml-small.en-tdrz.bin" \
@@ -63,7 +100,7 @@ curl -fL "https://huggingface.co/akashmjn/tinydiarize-whisper.cpp/resolve/main/g
   -o ./models/ggml-small.en-tdrz.bin
 ```
 
-### 5) 一条命令转录（输入链接）
+### 5) 一条命令转录
 
 ```bash
 python3 scripts/podcast_workflow.py --url "<podcast-episode-url>"
@@ -84,26 +121,61 @@ python3 scripts/podcast_workflow.py \
 outputs/20260321-123456-某期标题/
   audio.mp3
   01_transcript.md
+  01_transcript.json
+  01_diarization_tdrz.json
 ```
 
-最常用结果文件：`01_transcript.md`
+说明：
 
-查看最近一次结果目录：
+- `01_transcript.md`：基础可读稿
+- `01_transcript.json`：主转写结构化结果，默认保留
+- `01_diarization_tdrz.json`：说话人分离结构化结果，默认保留
+- 默认不生成 `01_transcript.srt`、`01_transcript.txt`
+- `run_manifest.json` 仅在 `--keep-json-artifacts` 时保留
+
+如果启用了 `--no-diarization`，则不会生成 `01_diarization_tdrz.json`。
+
+## 对谈稿格式
+
+默认会把连续的同一位说话人合并成一段，格式类似：
+
+```text
+张潇雨（00:12:01 - 00:12:48）：
+……
+
+雨白（00:12:48 - 00:13:10）：
+……
+```
+
+长段落会按标点自动断行，默认单行目标长度约 `100` 字。
+
+如已知两位说话人的名字，可直接替换 `Speaker A/B`：
 
 ```bash
-latest="$(ls -1dt outputs/* | head -n 1)"
-echo "$latest/01_transcript.md"
+python3 scripts/podcast_workflow.py \
+  --url "https://www.xiaoyuzhoufm.com/episode/69a64629de29766da93331ec" \
+  --speaker-a-name "张潇雨" \
+  --speaker-b-name "雨白"
 ```
 
-如需保留调试产物（`json/srt/txt` 与 `run_manifest.json`），可加：
+## profile 用法
+
+如需使用 profile（说话人名、噪声词、术语替换）：
 
 ```bash
-python3 scripts/podcast_workflow.py --url "<podcast-episode-url>" --keep-json-artifacts
+python3 scripts/podcast_workflow.py \
+  --url "<podcast-episode-url>" \
+  --profile my-show
 ```
+
+参考：
+
+- [`scripts/podcast_profiles/README.md`](podcast_profiles/README.md)
+- [`_template.profile.json`](podcast_profiles/_template.profile.json)
 
 ## 节目页（多集）用法
 
-节目页链接会交互列出最近 10 集。若在非交互环境（CI/脚本）运行，请显式指定集数：
+节目页链接会交互列出最近 10 集。若在非交互环境运行，请显式指定集数：
 
 ```bash
 python3 scripts/podcast_workflow.py \
@@ -116,16 +188,29 @@ python3 scripts/podcast_workflow.py \
 - `--url`：必填，播客链接
 - `--episode-index`：节目页选择第几集（1-based）
 - `--out-root`：输出目录根路径（默认 `./outputs`）
+- `--profile`：显式指定 profile 名称或 JSON 文件路径
+- `--profile-dir`：profile 目录（默认 `./scripts/podcast_profiles`）
 - `--whisper-bin`：`whisper-cli` 路径（默认 `./build/bin/whisper-cli`）
 - `--asr-model`：主转写模型路径（默认 `./models/ggml-large-v3-turbo.bin`）
 - `--gpu` / `--no-gpu`：开启/关闭 GPU 加速（默认开启）
 - `--keep-awake` / `--no-keep-awake`：运行时防休眠（macOS 默认开启）
 - `--progress-interval`：进度心跳打印间隔秒数（默认 `30`）
-- `--keep-json-artifacts` / `--no-keep-json-artifacts`：是否保留 `json/srt/txt` 与 `run_manifest`（默认不保留）
+- `--keep-json-artifacts` / `--no-keep-json-artifacts`：是否保留 `run_manifest.json` 等调试产物（默认不保留）
 - `--diarization` / `--no-diarization`：开启/关闭说话人分离（默认开启）
+- `--speaker-a-name`：为 `Speaker A` 指定展示名
+- `--speaker-b-name`：为 `Speaker B` 指定展示名
 - `--tdrz-model`：说话人分离模型路径（默认 `./models/ggml-small.en-tdrz.bin`）
 - `--language`：转录语言（默认 `zh`）
 - `--threads`：线程数（默认 `8`）
+
+## Skill：忠实清洗
+
+如果你需要 `02_transcript_clean.md`，请使用仓库内 skill：
+
+- [`codex-skills/podcast-transcript-editor/SKILL.md`](../codex-skills/podcast-transcript-editor/SKILL.md)
+
+这个 skill 会读取 `01_transcript.md`，必要时也会参考保留下来的 JSON，再输出忠实清洗版。
+它内部已经约定先做块级脏块筛选和缓存复用，不会默认把整篇 transcript 都送模型。
 
 ## 常见问题
 
@@ -136,4 +221,7 @@ python3 scripts/podcast_workflow.py \
 加上 `--episode-index`。
 
 3. 只想要纯转写，不要说话人分离
-加 `--no-diarization` 即可。
+加 `--no-diarization`。
+
+4. 想把节目术语、噪声词固化下来
+在 `scripts/podcast_profiles/` 下创建 profile。

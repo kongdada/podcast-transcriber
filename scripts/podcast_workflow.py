@@ -29,6 +29,7 @@ from typing import Any, Callable
 DEFAULT_ASR_MODEL = "./models/ggml-large-v3-turbo.bin"
 DEFAULT_TDRZ_MODEL = "./models/ggml-small.en-tdrz.bin"
 DEFAULT_WHISPER_BIN = "./build/bin/whisper-cli"
+DEFAULT_PROFILE_DIR = "./scripts/podcast_profiles"
 DEFAULT_LANGUAGE = "zh"
 DEFAULT_THREADS = 8
 DEFAULT_PROGRESS_INTERVAL_S = 30
@@ -63,6 +64,14 @@ class Segment:
 
 
 @dataclass
+class SpeakerTurn:
+    t0_ms: int
+    t1_ms: int
+    speaker: str | None
+    parts: list[str]
+
+
+@dataclass
 class TranscriptionResult:
     command: list[str]
     transcript_json: dict[str, Any]
@@ -78,6 +87,19 @@ class DiarizationAssessment:
     note: str
 
 
+@dataclass
+class PodcastProfile:
+    name: str
+    path: Path
+    source_url_regex: str | None
+    title_regex: str | None
+    input_url_regex: str | None
+    speaker_a_name: str | None
+    speaker_b_name: str | None
+    noise_phrases: list[str]
+    replacements: dict[str, str]
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="One-shot local podcast download + transcription workflow")
     parser.add_argument("--url", required=True, help="Podcast episode/show URL (Apple Podcasts or Xiaoyuzhou)")
@@ -88,6 +110,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Select episode index (1-based) from recent-10 list when URL is a show page",
     )
     parser.add_argument("--out-root", default="./outputs", help="Output root directory")
+    parser.add_argument("--profile", default=None, help="Optional profile name or JSON file path")
+    parser.add_argument("--profile-dir", default=DEFAULT_PROFILE_DIR, help="Profile directory")
     parser.add_argument("--whisper-bin", default=DEFAULT_WHISPER_BIN, help="Path or name of whisper-cli")
     parser.add_argument("--asr-model", default=DEFAULT_ASR_MODEL, help="Path to ASR model")
     parser.add_argument(
@@ -96,6 +120,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help="Enable speaker diarization by tinydiarize model",
     )
+    parser.add_argument("--speaker-a-name", default=None, help="Optional display name for Speaker A")
+    parser.add_argument("--speaker-b-name", default=None, help="Optional display name for Speaker B")
     parser.add_argument("--tdrz-model", default=DEFAULT_TDRZ_MODEL, help="Path to tinydiarize model")
     parser.add_argument("--language", default=DEFAULT_LANGUAGE, help="Whisper language code (default: zh)")
     parser.add_argument("--threads", type=int, default=DEFAULT_THREADS, help="Whisper thread count")
@@ -121,7 +147,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--keep-json-artifacts",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Keep JSON/SRT/TXT and run_manifest for debugging (default: false)",
+        help="Keep optional debug artifacts such as run_manifest.json (JSON transcript artifacts are kept by default)",
     )
     parser.add_argument("--retries", type=int, default=1, help="Retries for subprocess transient failures")
     return parser
@@ -138,7 +164,7 @@ def now_iso() -> str:
 
 
 def log(msg: str) -> None:
-    print(f"[podcast-workflow] {msg}")
+    print(f"[podcast-workflow] {msg}", flush=True)
 
 
 def fmt_elapsed(seconds: float) -> str:
@@ -196,7 +222,6 @@ def preflight(args: argparse.Namespace) -> tuple[str, str, str]:
         raise WorkflowError("--threads must be > 0")
     if args.progress_interval <= 0:
         raise WorkflowError("--progress-interval must be > 0")
-
     return yt_dlp_bin or "yt-dlp", ffmpeg_bin or "ffmpeg", whisper_bin or args.whisper_bin
 
 
@@ -509,6 +534,158 @@ def choose_episode(
         print(f"请输入 1 到 {len(display)} 之间的数字。")
 
 
+def discover_profile_files(profile_dir: Path) -> list[Path]:
+    if not profile_dir.exists() or not profile_dir.is_dir():
+        return []
+    return sorted(
+        p for p in profile_dir.glob("*.profile.json") if p.is_file() and not p.name.startswith("_")
+    )
+
+
+def parse_profile_text_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            result.append(item)
+    return result
+
+
+def parse_profile_replacements(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, repl in value.items():
+        if isinstance(key, str) and key and isinstance(repl, str):
+            result[key] = repl
+    return result
+
+
+def load_profile_from_file(path: Path) -> PodcastProfile:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkflowError(f"failed to load profile {path}: {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise WorkflowError(f"profile must be a JSON object: {path}")
+
+    match = raw.get("match") if isinstance(raw.get("match"), dict) else {}
+    name = raw.get("name") if isinstance(raw.get("name"), str) and raw.get("name") else path.stem
+
+    return PodcastProfile(
+        name=name,
+        path=path,
+        source_url_regex=match.get("source_url_regex") if isinstance(match.get("source_url_regex"), str) else None,
+        title_regex=match.get("title_regex") if isinstance(match.get("title_regex"), str) else None,
+        input_url_regex=match.get("input_url_regex") if isinstance(match.get("input_url_regex"), str) else None,
+        speaker_a_name=raw.get("speaker_a_name") if isinstance(raw.get("speaker_a_name"), str) else None,
+        speaker_b_name=raw.get("speaker_b_name") if isinstance(raw.get("speaker_b_name"), str) else None,
+        noise_phrases=parse_profile_text_list(raw.get("noise_phrases")),
+        replacements=parse_profile_replacements(raw.get("replacements")),
+    )
+
+
+def regex_matches(pattern: str | None, text: str) -> bool:
+    if not pattern:
+        return True
+    return re.search(pattern, text) is not None
+
+
+def profile_matches(profile: PodcastProfile, *, input_url: str, source_url: str, title: str) -> bool:
+    has_matcher = any([profile.input_url_regex, profile.source_url_regex, profile.title_regex])
+    if not has_matcher:
+        return False
+    return (
+        regex_matches(profile.input_url_regex, input_url)
+        and regex_matches(profile.source_url_regex, source_url)
+        and regex_matches(profile.title_regex, title)
+    )
+
+
+def resolve_profile(
+    *,
+    explicit_profile: str | None,
+    profile_dir: str,
+    input_url: str,
+    selected_episode: EpisodeCandidate,
+) -> PodcastProfile | None:
+    profile_root = Path(profile_dir)
+
+    if explicit_profile:
+        candidate = Path(explicit_profile)
+        if not candidate.exists():
+            if explicit_profile.endswith(".json"):
+                candidate = profile_root / explicit_profile
+            else:
+                candidate = profile_root / f"{explicit_profile}.profile.json"
+        if not candidate.exists():
+            raise WorkflowError(f"profile not found: {explicit_profile}")
+        profile = load_profile_from_file(candidate)
+        log(f"using explicit profile: {profile.name} ({candidate})")
+        return profile
+
+    for path in discover_profile_files(profile_root):
+        profile = load_profile_from_file(path)
+        if profile_matches(
+            profile,
+            input_url=input_url,
+            source_url=selected_episode.source_url,
+            title=selected_episode.title,
+        ):
+            log(f"matched profile: {profile.name}")
+            return profile
+    return None
+
+
+def clone_segments(segments: list[Segment]) -> list[Segment]:
+    return [
+        Segment(
+            t0_ms=seg.t0_ms,
+            t1_ms=seg.t1_ms,
+            text=seg.text,
+            speaker=seg.speaker,
+            speaker_turn_next=seg.speaker_turn_next,
+        )
+        for seg in segments
+    ]
+
+
+def apply_replacements(text: str, replacements: dict[str, str]) -> str:
+    rendered = text
+    for old, new in replacements.items():
+        rendered = rendered.replace(old, new)
+    return rendered
+
+
+def apply_profile_to_segments(segments: list[Segment], profile: PodcastProfile | None) -> list[Segment]:
+    if not profile:
+        return segments
+
+    result: list[Segment] = []
+    for seg in clone_segments(segments):
+        if profile.noise_phrases and any(phrase in seg.text for phrase in profile.noise_phrases):
+            continue
+        seg.text = apply_replacements(seg.text, profile.replacements)
+        result.append(seg)
+    return result
+
+
+def speaker_name_map(args: argparse.Namespace, profile: PodcastProfile | None) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    if profile:
+        if profile.speaker_a_name:
+            mapping["Speaker A"] = profile.speaker_a_name
+        if profile.speaker_b_name:
+            mapping["Speaker B"] = profile.speaker_b_name
+    if args.speaker_a_name:
+        mapping["Speaker A"] = args.speaker_a_name
+    if args.speaker_b_name:
+        mapping["Speaker B"] = args.speaker_b_name
+    return mapping
+
+
 def find_downloaded_file(stdout: str, temp_dir: Path) -> Path:
     for line in reversed([line.strip() for line in stdout.splitlines()]):
         if not line:
@@ -586,15 +763,15 @@ def build_whisper_cmd(
     out_prefix: Path,
     language: str,
     threads: int,
-    output_txt: bool = True,
-    output_srt: bool = True,
+    output_txt: bool = False,
+    output_srt: bool = False,
     output_json: bool = True,
     tinydiarize: bool = False,
     print_progress: bool = True,
     use_gpu: bool = True,
 ) -> list[str]:
     # Stable command profile:
-    # whisper-cli -m <model> -f <audio.mp3> -l zh -t 8 -mc 0 -otxt -osrt -oj -of <prefix> -pp
+    # whisper-cli -m <model> -f <audio.mp3> -l zh -t 8 -mc 0 -oj -of <prefix> -pp
     # add -ng only when GPU is explicitly disabled
     cmd = [
         whisper_bin,
@@ -760,7 +937,8 @@ def assign_turn_speakers(segments: list[Segment]) -> None:
         return
     speaker = "Speaker A"
     for seg in segments:
-        seg.speaker = speaker
+        if not seg.speaker:
+            seg.speaker = speaker
         if seg.speaker_turn_next:
             speaker = "Speaker B" if speaker == "Speaker A" else "Speaker A"
 
@@ -833,7 +1011,6 @@ def assess_diarization_quality(
     labeled_ratio = round(labeled_count / len(main_segments), 4)
     turn_markers = sum(1 for s in diar_segments if s.speaker_turn_next)
 
-    # For non-English audio, tdrz text itself is often noisy; speaker turns can still be useful.
     if detected_lang.startswith("en"):
         recommendation = labeled_ratio < 0.9 or (temporal_cov is not None and temporal_cov < 0.9)
         note = "english audio: diarization text is relatively comparable"
@@ -859,12 +1036,157 @@ def fmt_ms(ms: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+TURN_END_PUNCT = "。！？!?…"
+TURN_INLINE_PUNCT = "，；：、,;:"
+TURN_LEADING_PUNCT = "，。！？；：、,.!?;:)]）】〉》」』”’"
+TURN_WRAP_CHARS = 100
+
+
+def clean_turn_fragment(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def render_turn_text(parts: list[str]) -> str:
+    rendered = ""
+    for raw in parts:
+        part = clean_turn_fragment(raw).strip(" ，。；;")
+        if not part:
+            continue
+        if not rendered:
+            rendered = part
+            continue
+        if rendered[-1] in TURN_END_PUNCT + TURN_INLINE_PUNCT or part[0] in TURN_LEADING_PUNCT:
+            rendered += part
+        else:
+            rendered += "，" + part
+
+    rendered = re.sub(r"，{2,}", "，", rendered)
+    rendered = re.sub(r"([。！？!?…])，", r"\1", rendered)
+    if rendered and rendered[-1] not in TURN_END_PUNCT:
+        rendered += "。"
+    return rendered
+
+
+def split_keep_punct(text: str, punctuation: str) -> list[str]:
+    pieces: list[str] = []
+    current = ""
+    for ch in text:
+        current += ch
+        if ch in punctuation:
+            pieces.append(current)
+            current = ""
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def hard_wrap_text(text: str, max_chars: int) -> list[str]:
+    clean = text.strip()
+    if not clean:
+        return []
+    return [clean[i : i + max_chars] for i in range(0, len(clean), max_chars)]
+
+
+def pack_chunks(chunks: list[str], max_chars: int) -> list[str]:
+    lines: list[str] = []
+    current = ""
+
+    for raw in chunks:
+        chunk = raw.strip()
+        if not chunk:
+            continue
+
+        if len(chunk) > max_chars:
+            if current:
+                lines.append(current)
+                current = ""
+            lines.extend(hard_wrap_text(chunk, max_chars))
+            continue
+
+        if not current:
+            current = chunk
+            continue
+
+        if len(current) + len(chunk) <= max_chars:
+            current += chunk
+        else:
+            lines.append(current)
+            current = chunk
+
+    if current:
+        lines.append(current)
+
+    return lines
+
+
+def wrap_turn_text(text: str, max_chars: int = TURN_WRAP_CHARS) -> list[str]:
+    if len(text) <= max_chars:
+        return [text]
+
+    sentence_chunks = split_keep_punct(text, TURN_END_PUNCT)
+    if len(sentence_chunks) == 1:
+        clause_chunks = split_keep_punct(text, TURN_INLINE_PUNCT)
+        return pack_chunks(clause_chunks, max_chars)
+
+    lines: list[str] = []
+    current = ""
+
+    for sentence in sentence_chunks:
+        clause_lines = pack_chunks(split_keep_punct(sentence, TURN_INLINE_PUNCT), max_chars)
+        for clause_line in clause_lines:
+            if not current:
+                current = clause_line
+                continue
+
+            if len(current) + len(clause_line) <= max_chars:
+                current += clause_line
+            else:
+                lines.append(current)
+                current = clause_line
+
+    if current:
+        lines.append(current)
+
+    return lines
+
+
+def merge_segments_into_turns(segments: list[Segment]) -> list[SpeakerTurn]:
+    turns: list[SpeakerTurn] = []
+    current: SpeakerTurn | None = None
+
+    for seg in segments:
+        text = clean_turn_fragment(seg.text)
+        if not text and current is None:
+            continue
+
+        if current and current.speaker == seg.speaker:
+            current.t1_ms = seg.t1_ms
+            if text:
+                current.parts.append(text)
+            continue
+
+        if current:
+            turns.append(current)
+        current = SpeakerTurn(
+            t0_ms=seg.t0_ms,
+            t1_ms=seg.t1_ms,
+            speaker=seg.speaker,
+            parts=[text] if text else [],
+        )
+
+    if current:
+        turns.append(current)
+
+    return [turn for turn in turns if turn.parts]
+
+
 def transcript_markdown(
     segments: list[Segment],
     *,
     source_url: str,
     episode_title: str,
     language: str,
+    speaker_names: dict[str, str] | None = None,
 ) -> str:
     lines = [
         "# 转写稿",
@@ -878,11 +1200,20 @@ def transcript_markdown(
         "",
     ]
 
-    for seg in segments:
-        ts = f"[{fmt_ms(seg.t0_ms)} - {fmt_ms(seg.t1_ms)}]"
-        if seg.speaker:
-            lines.append(f"- {ts} {seg.speaker}: {seg.text}")
-        else:
+    if any(seg.speaker for seg in segments):
+        for turn in merge_segments_into_turns(segments):
+            speaker = speaker_names.get(turn.speaker, turn.speaker) if speaker_names and turn.speaker else turn.speaker
+            ts = f"{fmt_ms(turn.t0_ms)} - {fmt_ms(turn.t1_ms)}"
+            text = render_turn_text(turn.parts)
+            if speaker:
+                lines.append(f"{speaker}（{ts}）：")
+            else:
+                lines.append(f"（{ts}）")
+            lines.extend(wrap_turn_text(text))
+            lines.append("")
+    else:
+        for seg in segments:
+            ts = f"[{fmt_ms(seg.t0_ms)} - {fmt_ms(seg.t1_ms)}]"
             lines.append(f"- {ts} {seg.text}")
 
     lines.append("")
@@ -910,6 +1241,13 @@ def execute_workflow(args: argparse.Namespace, *, input_fn: Callable[[str], str]
             duration_s=int(info["duration"]) if isinstance(info.get("duration"), (int, float)) else None,
             uploader=info.get("uploader") if isinstance(info.get("uploader"), str) else None,
         )
+    profile = resolve_profile(
+        explicit_profile=args.profile,
+        profile_dir=args.profile_dir,
+        input_url=args.url,
+        selected_episode=selected,
+    )
+    speaker_names = speaker_name_map(args, profile)
 
     run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{slugify(selected.title)[:48]}"
     out_dir = Path(args.out_root).resolve() / run_id
@@ -984,6 +1322,7 @@ def execute_workflow(args: argparse.Namespace, *, input_fn: Callable[[str], str]
     segments = parse_segments(asr.transcript_json)
     if args.diarization and diar_segments:
         merge_speaker_labels(segments, diar_segments)
+    segments = apply_profile_to_segments(segments, profile)
     detected_lang = language_from_whisper_json(asr.transcript_json, fallback=args.language)
     if args.diarization and diar_segments:
         diar_assessment = assess_diarization_quality(segments, diar_segments, detected_lang)
@@ -1009,6 +1348,7 @@ def execute_workflow(args: argparse.Namespace, *, input_fn: Callable[[str], str]
         source_url=args.url,
         episode_title=selected.title,
         language=detected_lang,
+        speaker_names=speaker_names,
     )
     transcript_path = out_dir / "01_transcript.md"
     transcript_path.write_text(transcript_md, encoding="utf-8")
@@ -1028,6 +1368,12 @@ def execute_workflow(args: argparse.Namespace, *, input_fn: Callable[[str], str]
                 "duration_s": selected.duration_s,
                 "uploader": selected.uploader,
             },
+            "profile": {
+                "name": profile.name,
+                "path": str(profile.path),
+            }
+            if profile
+            else None,
             "models": {
                 "asr_model": str(Path(args.asr_model)),
                 "whisper_bin": whisper_bin,
@@ -1041,6 +1387,7 @@ def execute_workflow(args: argparse.Namespace, *, input_fn: Callable[[str], str]
                 "command": asr.command,
                 "diarization_requested": bool(args.diarization),
                 "diarization_applied": bool(args.diarization and diar_segments),
+                "diarization_model": args.tdrz_model if args.diarization else None,
                 "progress_interval_s": int(args.progress_interval),
                 "diarization_assessment": {
                     "text_similarity_ratio": diar_assessment.text_similarity_ratio,
@@ -1056,8 +1403,6 @@ def execute_workflow(args: argparse.Namespace, *, input_fn: Callable[[str], str]
             "artifacts": {
                 "audio_mp3": "audio.mp3",
                 "transcript_md": "01_transcript.md",
-                "transcript_txt": "01_transcript.txt",
-                "transcript_srt": "01_transcript.srt",
                 "transcript_json": "01_transcript.json",
                 "diarization_json": "01_diarization_tdrz.json" if args.diarization and diar_segments else None,
             },
@@ -1066,10 +1411,6 @@ def execute_workflow(args: argparse.Namespace, *, input_fn: Callable[[str], str]
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     else:
         for extra in [
-            out_dir / "01_transcript.json",
-            out_dir / "01_transcript.txt",
-            out_dir / "01_transcript.srt",
-            out_dir / "01_diarization_tdrz.json",
             out_dir / "run_manifest.json",
         ]:
             try:
