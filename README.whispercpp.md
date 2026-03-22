@@ -19,9 +19,8 @@ Stable: [v1.8.1](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.8.1) / 
 - 中文使用说明：[`scripts/README.podcast_workflow.zh.md`](scripts/README.podcast_workflow.zh.md)
 - 一条命令输入 Apple Podcasts / 小宇宙单集链接，自动下载音频并转写
 - 支持本地 `whisper-cli` 转录，可选 GPU 加速与运行中进度心跳
-- 产出精简为 `audio.mp3` + `01_transcript.md`，默认按对谈轮次合并，不保留中间 JSON/SRT
+- 产出精简为 `audio.mp3` + `01_transcript.md`，默认按对谈轮次合并
 - 支持 `profile` 配置术语替换和噪声词过滤
-- 可选 OpenAI faithful cleanup，额外生成 `02_transcript_clean.md`
 - 可选 tinydiarize 说话人分离并合并成带说话人标注的稿件
 
 High-performance inference of [OpenAI's Whisper](https://github.com/openai/whisper) automatic speech recognition (ASR) model:
@@ -924,27 +923,19 @@ python3 scripts/podcast_workflow.py \
   --speaker-b-name "雨白"
 ```
 
-Optional faithful cleanup:
-
-```bash
-export OPENAI_API_KEY="<your-key>"
-python3 scripts/podcast_workflow.py \
-  --url "https://www.xiaoyuzhoufm.com/episode/69a64629de29766da93331ec" \
-  --clean-with-llm
-```
-
 ### Output
 
 Each run creates a new folder under `./outputs`, for example:
 
 - `audio.mp3`
 - `01_transcript.md`
-- `02_transcript_clean.md` (only with `--clean-with-llm`)
+- `01_transcript.json`
+- `01_diarization_tdrz.json` (only with diarization enabled)
 
 Most users only need `01_transcript.md`.
 It is rendered as merged dialogue paragraphs when speaker labels are available.
 
-If you want debugging artifacts (`json/srt/txt` + `run_manifest.json`), enable:
+If you want `run_manifest.json`, enable:
 
 ```bash
 python3 scripts/podcast_workflow.py --url "<podcast-episode-url>" --keep-json-artifacts
@@ -966,11 +957,10 @@ python3 scripts/podcast_workflow.py \
 - GPU acceleration is on by default (`--gpu` / `--no-gpu`).
 - Progress heartbeat prints every 30s by default (`--progress-interval 30`).
 - On macOS, keep-awake is enabled by default during ASR (`--keep-awake` / `--no-keep-awake`).
-- JSON/SRT/TXT outputs are removed by default (`--keep-json-artifacts` to retain).
+- `01_transcript.json` and diarization JSON are kept by default.
 - Speaker diarization is on by default (`--diarization`).
 - Optional display-name overrides: `--speaker-a-name`, `--speaker-b-name`.
 - Profiles live under `scripts/podcast_profiles` and can be selected with `--profile`.
-- Faithful cleanup uses `OPENAI_API_KEY` plus `--clean-with-llm`.
 - If tinydiarize model is unavailable, use `--no-diarization`.
 - Missing dependencies/models are reported with install hints and the script exits immediately.
 

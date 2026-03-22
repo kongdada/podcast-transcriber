@@ -15,7 +15,7 @@
 5. 合并轮次，输出对谈稿格式的 `01_transcript.md`
 6. 应用 `profile` 中的说话人名称、噪声短语和术语替换
 
-脚本不负责语义清洗。`02_transcript_clean.md` 由仓库内的 skill 生成。
+脚本不负责语义清洗。当前仓库默认只产出基础稿 `01_transcript.md`。
 
 说明：
 
@@ -35,20 +35,7 @@ flowchart TD
     F -- "否" --> H["直接排版"]
     G --> H["合并轮次 + profile 替换/噪声过滤<br/>输出 01_transcript.md"]
     H --> I["基础产物完成"]
-
-    I --> J{"是否继续做忠实清洗?"}
-    J -- "否" --> K["结束<br/>交付 01_transcript.md"]
-    J -- "是" --> L["podcast-transcript-editor skill"]
-    L --> M["cleanup_helper.py plan<br/>分块 + 脏块筛选"]
-    M --> N{"块类型"}
-    N -- "pass_through" --> O["跳过模型"]
-    N -- "from_cache" --> P["复用缓存块"]
-    N -- "needs_model" --> Q["送模型做忠实清洗"]
-    O --> R["assemble 组装输出"]
-    P --> R
-    Q --> S["回填 cleaned_block"]
-    S --> R
-    R --> T["生成 02_transcript_clean.md<br/>并更新缓存"]
+    I --> J["结束<br/>交付 01_transcript.md"]
 ```
 
 ## 从零开始
@@ -202,15 +189,6 @@ python3 scripts/podcast_workflow.py \
 - `--tdrz-model`：说话人分离模型路径（默认 `./models/ggml-small.en-tdrz.bin`）
 - `--language`：转录语言（默认 `zh`）
 - `--threads`：线程数（默认 `8`）
-
-## Skill：忠实清洗
-
-如果你需要 `02_transcript_clean.md`，请使用仓库内 skill：
-
-- [`codex-skills/podcast-transcript-editor/SKILL.md`](../codex-skills/podcast-transcript-editor/SKILL.md)
-
-这个 skill 会读取 `01_transcript.md`，必要时也会参考保留下来的 JSON，再输出忠实清洗版。
-它内部已经约定先做块级脏块筛选和缓存复用，不会默认把整篇 transcript 都送模型。
 
 ## 常见问题
 

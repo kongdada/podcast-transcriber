@@ -2,15 +2,13 @@
 
 把 Apple Podcasts / 小宇宙链接转成可读的播客转录稿。
 
-这个仓库现在有两层能力：
+这个仓库当前聚焦一条本地 CLI 流程：
 
-- `CLI`：本地下载音频、转 MP3、Whisper 转录、说话人轮次排版、硬规则清洗
-- `Skill`：在 Codex 里对 `01_transcript.md` 做忠实语义清洗，生成 `02_transcript_clean.md`
+- 本地下载音频、转 MP3、Whisper 转录、说话人轮次排版、硬规则清洗
 
 ## 快速入口
 
 - 中文 CLI 说明：[`scripts/README.podcast_workflow.zh.md`](scripts/README.podcast_workflow.zh.md)
-- Skill 定义：[`codex-skills/podcast-transcript-editor/SKILL.md`](codex-skills/podcast-transcript-editor/SKILL.md)
 - `whisper.cpp` 原始构建/能力文档：[`README.whispercpp.md`](README.whispercpp.md)
 
 ## 项目能做什么
@@ -28,8 +26,7 @@
 
 - 当前工作流按 `Speaker A / Speaker B` 两位对谈场景设计
 - 本地 `tinydiarize` 主要提供二人轮次提示
-
-如果你在 Codex 中使用 skill，还可以继续把 `01_transcript.md` 清洗为更顺畅、但仍忠实原文的 `02_transcript_clean.md`。
+- 如需进一步润稿，请基于 `01_transcript.md` 自行做人工或模型后处理
 
 ## 完整工作流程图
 
@@ -43,26 +40,8 @@ flowchart TD
     F -- "是" --> G["tinydiarize 二次转写<br/>输出 01_diarization_tdrz.json"]
     F -- "否" --> H["直接进入排版"]
     G --> H["合并说话人轮次 + profile 硬规则清洗<br/>生成 01_transcript.md"]
-    H --> I["基础产物目录<br/>audio.mp3 / 01_transcript.md / JSON"]
-
-    I --> J{"是否使用 Codex Skill<br/>做忠实语义清洗?"}
-    J -- "否" --> K["结束<br/>交付 01_transcript.md"]
-    J -- "是" --> L["Skill 读取 01_transcript.md<br/>必要时参考 JSON"]
-
-    L --> M["cleanup_helper.py plan<br/>按块切分 transcript"]
-    M --> N["块级脏块筛选"]
-    N --> O{"块类型"}
-    O -- "pass_through" --> P["直接沿用原文块"]
-    O -- "from_cache" --> Q["复用 .podcast-transcript-editor-cache.json"]
-    O -- "needs_model" --> R["用固定低浪费 prompt<br/>只清洗脏块"]
-
-    P --> S["assemble<br/>组装最终清洗稿"]
-    Q --> S
-    R --> T["回填 cleaned_block 到 plan"]
-    T --> S
-
-    S --> U["输出 02_transcript_clean.md"]
-    S --> V["更新块级缓存"]
+    H --> I["输出目录<br/>audio.mp3 / 01_transcript.md / JSON"]
+    I --> J["结束<br/>交付基础转录稿"]
 ```
 
 ## 一条命令得到转录稿
@@ -143,12 +122,11 @@ outputs/20260321-123456-某期标题/
 
 - `01_transcript.srt`
 - `01_transcript.txt`
-- `02_transcript_clean.md`
 
 说明：
 
 - `01_transcript.md` 是基础标准稿，适合直接阅读
-- `01_transcript.json` 和说话人分离 JSON 会默认保留，供 skill 或人工复核复用
+- `01_transcript.json` 和说话人分离 JSON 会默认保留，供人工复核或后续自定义处理复用
 - `run_manifest.json` 只在 `--keep-json-artifacts` 时保留
 
 ## 对谈稿格式
@@ -168,37 +146,6 @@ python3 scripts/podcast_workflow.py \
   --speaker-a-name "张潇雨" \
   --speaker-b-name "雨白"
 ```
-
-## Skill：忠实语义清洗
-
-Skill 定义保存在仓库里：
-
-- [`codex-skills/podcast-transcript-editor`](codex-skills/podcast-transcript-editor)
-
-安装到本机 Codex skills 目录：
-
-```bash
-mkdir -p ~/.codex/skills
-ln -s "$PWD/codex-skills/podcast-transcript-editor" ~/.codex/skills/podcast-transcript-editor
-```
-
-这个 skill 支持两种输入：
-
-- 直接给播客 URL：先调用本地 CLI 生成 `01_transcript.md`，再做忠实清洗
-- 直接给现有 `01_transcript.md`：只生成 `02_transcript_clean.md`
-
-为了节省 token，skill 不会默认把整篇 transcript 都送进模型，而是：
-
-- 先按块做脏块筛选
-- 干净块直接跳过模型
-- 命中缓存的块直接复用
-- 只把 `needs_model` 的块送模型
-
-Skill 的清洗边界：
-
-- 忠实原文，不总结、不扩写、不改观点
-- 只修明显错字、专有名词错误、标点、断句和轻微语病
-- 保留口语感，不改写成文章
 
 ## profile 机制
 
@@ -254,13 +201,9 @@ python3 scripts/podcast_workflow.py --url "<podcast-url>" --keep-json-artifacts
 2. 节目页在非交互环境失败
    显式加 `--episode-index`
 3. 想要更顺畅、但忠实原文的清洗版
-   使用仓库内的 `podcast-transcript-editor` skill
+   当前仓库只产出基础稿 `01_transcript.md`，建议基于该文件自行做人工或模型后处理
 
 ## 相关文档
 
 - CLI 详细说明：[`scripts/README.podcast_workflow.zh.md`](scripts/README.podcast_workflow.zh.md)
-- Skill 说明：[`codex-skills/podcast-transcript-editor/SKILL.md`](codex-skills/podcast-transcript-editor/SKILL.md)
-- 归档的 `whisper.cpp` 文档：[`README.whispercpp.md`](README.whispercpp.md)
-- CLI 详细说明：[`scripts/README.podcast_workflow.zh.md`](scripts/README.podcast_workflow.zh.md)
-- Skill 说明：[`codex-skills/podcast-transcript-editor/SKILL.md`](codex-skills/podcast-transcript-editor/SKILL.md)
 - 归档的 `whisper.cpp` 文档：[`README.whispercpp.md`](README.whispercpp.md)
