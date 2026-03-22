@@ -1,0 +1,4 @@
+interface:
+  display_name: "Podcast Transcript Editor"
+  short_description: "Help clean podcast transcripts with faithful editing"
+  default_prompt: "Use $podcast-transcript-editor to turn a podcast URL or transcript into a faithful cleaned transcript."

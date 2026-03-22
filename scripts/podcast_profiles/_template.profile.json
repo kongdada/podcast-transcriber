@@ -1,0 +1,18 @@
+{
+  "name": "template",
+  "match": {
+    "input_url_regex": "https://example.com/show",
+    "source_url_regex": "https://example.com/episode",
+    "title_regex": "示例播客"
+  },
+  "speaker_a_name": "主持人",
+  "speaker_b_name": "嘉宾",
+  "noise_phrases": [
+    "请不吝点赞",
+    "打赏支持明镜"
+  ],
+  "replacements": {
+    "博客": "播客",
+    "执行小酒馆": "知行小酒馆"
+  }
+}
